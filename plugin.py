@@ -26,6 +26,8 @@
         <param field="Address" label="IP address" width="200px" required="true"/>
         <param field="Mode1" label="DevID" width="200px" required="true"/>
         <param field="Mode2" label="Local Key" width="200px" required="true"/>
+        <param field="Mode3" label="Time to open (seconds)" width="200px" required="true"/>
+        <param field="Mode4" label="Time to close (seconds)" width="200px" required="true"/>
         <param field="Mode5" label="DPS always ON" width="200px" required="true" default="None"/>
         <param field="Mode6" label="Debug" width="75px">
             <options>
@@ -59,12 +61,27 @@
 
 import Domoticz
 import pytuya
+import time
+import threading
+
 
 ########################################################################################
 #
 # plugin object
 #
 ########################################################################################
+class Blind:
+    def __init__(self):
+        self.__address = None  # IP address of the smartblind
+        self.__devID = None  # devID of the smartblind
+        self.__localKey = None  # localKey of the smartblind
+        self.__device = None  # pytuya object of the smartblind
+        self.__runAgain = self.__HB_BASE_FREQ  # heartbeat smartblind
+        self.__connection = None  # connection to the tuya plug
+        self.__plugs = None  # mapping between dps id and a plug object
+        self.__state_machine = 0
+        # state_machine: 0 -> no waiting msg ; 1 -> set command sent ; 2 -> status command sent
+        return
 
 
 class BasePlugin:
@@ -75,8 +92,6 @@ class BasePlugin:
     #######################################################################
     __HB_BASE_FREQ = 2  # heartbeat frequency (val x 10 seconds)
     __VALID_CMD = ('Open', 'Close', 'Stop')  # list of valid command
-
-
 
     #######################################################################
     #
@@ -92,6 +107,13 @@ class BasePlugin:
         self.__connection = None  # connection to the tuya plug
         self.__plugs = None  # mapping between dps id and a plug object
         self.__state_machine = 0  # state_machine: 0 -> no waiting msg ; 1 -> set command sent ; 2 -> status command sent
+        self.__start_moving = None
+        self.__start_level = None
+        self.__level = 0
+        self.__nValue = 0
+        self.__running = 0
+        self.__direction = None
+        self.__on_running_timer = None
         return
 
     #######################################################################
@@ -111,6 +133,10 @@ class BasePlugin:
         self.__address = Parameters["Address"]
         self.__devID = Parameters["Mode1"]
         self.__localKey = Parameters["Mode2"]
+        self.__timeToOpen = Parameters["Mode3"]
+        self.__timeToClose = Parameters["Mode4"]
+        self.__start_moving = None
+        self.__on_running_timer = None
 
         # set the next heartbeat
         self.__runAgain = self.__HB_BASE_FREQ
@@ -120,35 +146,88 @@ class BasePlugin:
                        "LevelNames": "Off|On|Stop",
                        "LevelOffHidden": "false",
                        "SelectorStyle": "0"}
-            Domoticz.Device(Name="Tuya SmartBlind", Unit=1, Type=244, Switchtype=15, Options=Options).Create()
+            Domoticz.Device(Name="Tuya SmartBlind", Unit=1, Type=244, Switchtype=13, Options=Options).Create()
             Domoticz.Debug("Tuya SmartBlind Device created.")
         else:
-            Domoticz.Debug("El dispositivo ya existe. "+str(Devices))
+            Domoticz.Debug("El dispositivo ya existe. " + str(Devices))
+
+        self.__dom_devices = Devices
 
         # create the pytuya object
         self.__device = pytuya.CoverDevice(self.__devID, self.__address, self.__localKey)
-
         Domoticz.Debug(str(self.__device))
 
-        # state machine
-        self.__state_machine = 1
+    def starting_movement(self, direction):
+        self.__start_moving = time.time()
+        self.__start_level = self.__level
+        self.__direction = direction
 
-        state = self.__device.state()
-        Domoticz.Log("State is: " + str(state))
+    def stopping_movement(self):
+        self.__start_moving = None
+        self.__start_level = None
+        self.__direction = None
+
+    def update_levels(self):
+        if self.__start_moving is None:
+            return
+        working_time = time.time() - self.__start_moving
+        Domoticz.Debug("update_levels - working_time: " + str(working_time))
+        if self.__direction == "off":  # open
+            max_time = float(self.__timeToOpen)
+            percent = int(round(float(working_time) * 100.0 / float(max_time)))
+            new_level = int(self.__start_level) - int(percent)
+            if new_level < 0:
+                new_level = 0
+
+            if new_level == 0:
+                self.__nValue = 0
+            elif new_level < 100:
+                self.__nValue = 2
+            self.__level = new_level
+        elif self.__direction == "on":  # close
+            max_time = float(self.__timeToClose)
+            percent = int(round(float(working_time) * 100.0 / float(max_time)))
+            new_level = int(self.__start_level) + int(percent)
+            if new_level > 100:
+                new_level = 100
+
+            if new_level == 100:
+                self.__nValue = 1
+            elif new_level > 0:
+                self.__nValue = 2
+            self.__level = new_level
+        Domoticz.Debug("update_levels - percent moved: " + str(working_time) + " new level: " + str(new_level))
+        self.update_device()
+        if working_time > max_time:
+            self.stopping_movement()
+            self.__device.stop()
+            return
 
     #######################################################################
     #
     # onCommand Domoticz function
     #
     #######################################################################
-    def onCommand(self, Unit, Command, Level, Hue):
-        Domoticz.Log("onCommand called for Unit " + str(Unit) + ": Command '" + str(Command) + "' Level: " + str(Level))
-        if Command == "Off":
-            self.__device.open()
-        if Command == "On":
-            self.__device.close()
-        if Command == "Stop":
-            self.__device.stop()
+    def onCommand(self, unit, command, level, Hue):
+        Domoticz.Log("onCommand called for Unit " + str(unit) + ": Command '" + str(command) + "' Level: " + str(level))
+        if command == "Off":  # open blind
+            if self.__direction == "on":
+                command = "Stop"
+            else:
+                self.starting_movement("off")
+                self.onRunning()
+                self.__device.open()
+        if command == "On":  # close blind
+            if self.__direction == "off":
+                command = "Stop"
+            else:
+                self.starting_movement("on")
+                self.onRunning()
+                self.__device.close()
+        if command == "Stop":
+            # self.__device.stop()
+            self.__on_running_timer.cancel()
+            self.stopping_movement()
 
     #######################################################################
     #
@@ -158,10 +237,22 @@ class BasePlugin:
     def onHeartbeat(self):
         Domoticz.Debug("onHeartbeat called")
         self.__runAgain -= 1
-        if (self.__runAgain == 0):
+        if self.__runAgain == 0:
             self.__runAgain = self.__HB_BASE_FREQ
             state = self.__device.state()
-            Domoticz.Log("State is:" + str(state))
+            Domoticz.Log("State is: " + str(state))
+
+    def onRunning(self):
+        Domoticz.Debug("onRunning called")
+        self.update_levels()
+        if self.__direction is not None:
+            self.__on_running_timer = threading.Timer(1, self.onRunning)
+            self.__on_running_timer.start()
+
+    def update_device(self):
+        self.__dom_devices[1].Update(nValue=self.__nValue, sValue=str(self.__level), Switchtype=13, TimedOut=0)
+        self.__dom_devices[1].Refresh()
+
 
 ########################################################################################
 #
@@ -176,22 +267,12 @@ def onStart():
     global _plugin
     _plugin.onStart()
 
+
 def onCommand(Unit, Command, Level, Hue):
     global _plugin
     _plugin.onCommand(Unit, Command, Level, Hue)
 
+
 def onHeartbeat():
     global _plugin
     _plugin.onHeartbeat()
-
-
-################################################################################
-# Generic helper functions
-################################################################################
-
-def UpdateDevice(Unit, nValue, sValue, TimedOut=0, AlwaysUpdate=False):
-    # Make sure that the Domoticz device still exists (they can be deleted) before updating it
-    if Unit in Devices:
-        if Devices[Unit].nValue != nValue or Devices[Unit].sValue != sValue or Devices[Unit].TimedOut != TimedOut or AlwaysUpdate:
-            Devices[Unit].Update(nValue=nValue, sValue=str(sValue), TimedOut=TimedOut)
-            Domoticz.Log("Update " + Devices[Unit].Name + ": " + str(nValue) + " - '" + str(sValue) + "'")
