@@ -142,7 +142,7 @@ class BasePlugin:
     #
     #######################################################################
     def onCommand(self, Unit, Command, Level, Hue):
-        Domoticz.Log("onCommand called for Unit " + str(Unit) + ": Command '" + str(Command) + "' Level: " + str(Level))
+        Domoticz.Debug("onCommand called for Unit " + str(Unit) + ": Command '" + str(Command) + "' Level: " + str(Level))
         if Command == "Off":
             self.__device.open()
         if Command == "On":
@@ -161,7 +161,7 @@ class BasePlugin:
         if (self.__runAgain == 0):
             self.__runAgain = self.__HB_BASE_FREQ
             state = self.__device.state()
-            Domoticz.Log("State is:" + str(state))
+            Domoticz.Debug("State is:" + str(state))
 
 ########################################################################################
 #
@@ -194,4 +194,4 @@ def UpdateDevice(Unit, nValue, sValue, TimedOut=0, AlwaysUpdate=False):
     if Unit in Devices:
         if Devices[Unit].nValue != nValue or Devices[Unit].sValue != sValue or Devices[Unit].TimedOut != TimedOut or AlwaysUpdate:
             Devices[Unit].Update(nValue=nValue, sValue=str(sValue), TimedOut=TimedOut)
-            Domoticz.Log("Update " + Devices[Unit].Name + ": " + str(nValue) + " - '" + str(sValue) + "'")
+            Domoticz.Debug("Update " + Devices[Unit].Name + ": " + str(nValue) + " - '" + str(sValue) + "'")

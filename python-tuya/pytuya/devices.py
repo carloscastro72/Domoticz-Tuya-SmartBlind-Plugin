@@ -15,6 +15,7 @@ import socket
 import time
 import binascii
 from pytuya.utils import hex2bin, bin2hex, AESCipher, Colour
+import Domoticz
 
 log = logging.getLogger(__name__)
 
@@ -330,6 +331,9 @@ class CoverDevice(Device):
 
     def state(self):
         status = self.status()
+        error = status.get('error')
+        if error:
+            return None
         if type(status) is bytes:
             return str(status)
         return {'1': "opening or open", '2': "closing or closed", '3': "stopped"}.get(status.get('dps').get('1'))
